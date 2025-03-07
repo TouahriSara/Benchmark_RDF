@@ -2,6 +2,8 @@ import csv
 import re
 from datetime import datetime
 from collections import defaultdict
+import os
+import tempfile  # added for temporary file management
 
 # Fonction pour analyser les opérations dans une requête SPARQL
 def analyse_operations(query):
@@ -67,6 +69,57 @@ def analyse_operations(query):
     # Retourner le vecteur des opérations
     return list(operations.values())
 
+def count_distinct_triplets(nt_filename, num_buckets=1000):
+    import re
+    # Expression régulière pour capturer :
+    # - un sujet sous forme d'URI (entre < et >)
+    # - un prédicat sous forme d'URI
+    # - un objet qui peut être un littéral entre guillemets (avec éventuel tag ou datatype) ou un URI
+    triple_pattern = re.compile(
+        r'^(<[^>]+>)\s+'                      # Sujet
+        r'(<[^>]+>)\s+'                       # Prédicat
+        r'((?:"(?:\\"|[^"])*"(?:\^\^<[^>]+>|@[a-zA-Z\-]+)?)|(?:<[^>]+>))\s*\.\s*$'
+    )
+    
+    # Créer des fichiers temporaires pour chaque bucket
+    bucket_files = {}
+    for i in range(num_buckets):
+        bucket_files[i] = tempfile.NamedTemporaryFile(mode='w+', delete=False)
+    
+    with open(nt_filename, 'r', encoding='utf-8') as nt_file:
+        for line in nt_file:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                match = triple_pattern.match(line)
+                if match:
+                    subject = match.group(1)
+                    predicate = match.group(2)
+                    object_val = match.group(3)
+                    triple = (subject, predicate, object_val)
+                    bucket = hash(triple) % num_buckets
+                    bucket_files[bucket].write(' '.join(triple) + '\n')
+                else:
+                    # Si la ligne ne correspond pas au pattern, vous pouvez gérer l'exception ou l'ignorer
+                    print(f"Ligne non reconnue : {line}")
+    
+    # Fermer et traiter les fichiers temporaires
+    for f in bucket_files.values():
+        f.close()
+    
+    distinct_count = 0
+    for i in range(num_buckets):
+        bucket_file_name = bucket_files[i].name
+        seen = set()
+        with open(bucket_file_name, 'r', encoding='utf-8') as f:
+            for line in f:
+                triple = tuple(line.strip().split(' ', 2))
+                seen.add(triple)
+        distinct_count += len(seen)
+        os.remove(bucket_file_name)
+    
+    return distinct_count
+
+
 # Fonction pour lire le fichier et analyser les requêtes
 def process_sparql_queries(input_filename, nt_filename, output_filename, text_filename):
     results = []
@@ -85,27 +138,23 @@ def process_sparql_queries(input_filename, nt_filename, output_filename, text_fi
                 operation_vector2 = analyse_operations(query)
                 results2.append(operation_vector2)
 
-    # Lire le fichier .nt et compter les triplets distincts
-    distinct_triplets = set()
-    with open(nt_filename, 'r') as nt_file:
-        for line in nt_file:
-            line = line.strip()
-            if line and not line.startswith('#'):  # Ignorer les commentaires
-                parts = line.split(' ')
-                if len(parts) == 3:
-                    subject, predicate, obj = parts
-                    distinct_triplets.add((subject, predicate, obj))
+    # Utiliser la nouvelle fonction pour compter les triplets distincts sans charger tout en mémoire
+    nb_distinct_triplets = count_distinct_triplets(nt_filename)
+    
+    # Création du répertoire "generated_files" s'il n'existe pas
+    os.makedirs("generated_files", exist_ok=True)
 
-    nb_distinct_triplets = len(distinct_triplets)
-
+    # Définition des chemins de sortie des fichiers
+    output_filepath = os.path.join("generated_files", output_filename)
+    text_filepath = os.path.join("generated_files", text_filename)
     # Écriture des résultats dans un fichier CSV
-    with open(output_filename, 'w', newline='') as csvfile:
+    with open(output_filepath, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(['Requête', 'SELECT(n)', 'JOIN(n)', 'FILTER(1ou 0)', 'UNION(n ou 0)', 'ORDER BY(1ou 0)', 'GROUP BY(1ou 0)', 'LIMIT/OFFSET(1ou 0)'])
         writer.writerows(results)
 
     # Écriture des résultats dans un fichier texte
-    with open(text_filename, 'w') as txtfile:
+    with open(text_filepath, 'w') as txtfile:
         txtfile.write(f"Nombre total de requêtes: {nb_queries}\n")
         txtfile.write(f"Nombre total de triplets distincts dans le fichier .nt: {nb_distinct_triplets}\n\n")
         for query, operation_vector2 in zip(queries, results2):
@@ -117,10 +166,17 @@ def process_sparql_queries(input_filename, nt_filename, output_filename, text_fi
     print(f"Les résultats ont été enregistrés dans le fichier : {output_filename}")
     print(f"Le nombre total de requêtes a été enregistré dans le fichier : {text_filename}")
 
-# Exemple d'utilisation
-input_filename = '/home/adminlias/ddd/Downloads/rdf-exp-master/queries/workloads/watdiv-1b/string/workload_20k/all_sequential_F_C_S_L.q'
-nt_file = '/home/adminlias/ddd/Downloads/wsdts_100m.nt'
+#_________________________________________ QUERIES_FILE_______________________________________________________________#
+#/home/adminlias/ddd/Downloads/rdf-exp-master/queries/workloads/lubm10240/string/workload_10k/all_batch_sequential.q
 
+input_filename = '/home/adminlias/data/ddd/Downloads/rdf-exp-master/queries/workloads/watdiv-1b/string/workload_20k/all_sequential_F_C_S_L.q'
+
+#input_filename = '/home/adminlias/data/PFE_/queries_test.q'
+#_________________________________________ NT_FILE_______________________________________________________________#
+#/home/adminlias/data/ddd/Downloads/10240_new_str/string/10240/lubm10240.nt
+nt_file = '/home/adminlias/data/ddd/Downloads/wsdts_100m.nt'
+#nt_file='/home/adminlias/data/PFE_/queries_test_2.nt'
+#nt_file = '/home/adminlias/Downloads/data2.nt'
 # Générer un nom de fichier de sortie avec horodatage
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 output_filename = f'query_vector_{timestamp}.csv'
