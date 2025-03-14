@@ -11,8 +11,7 @@ SPARQL_ENDPOINT = 'http://localhost:3030/dataset/query'
 
 # Générer un suffixe basé sur la date et l'heure actuelle
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-power_log_file = f'power_log_watdiv_jena_{timestamp}.csv'
-query_time_log = f'query_time_log_watdiv_jena_{timestamp}.csv'
+power_log_file = f'power_log_LUBM_virtuoso_withbuffer_{timestamp}.csv'
 
 # Initialisation de l'API Yoctopuce
 errmsg = YRefParam()
@@ -43,23 +42,8 @@ def run_sparql_query(query):
         print(response.text)
         return None
 
-# Mesurer la consommation de base du système sur une durée donnée (en l'absence de requête)
-def measure_baseline(duration=5, sampling_interval=0.1):
-    readings = []
-    start = time.time()
-    print("Mesure du baseline en cours...")
-    while time.time() - start < duration:
-        power = sensor.get_currentValue()
-        readings.append(power)
-        print(f"Baseline mesure : {power:.2f} W")
-        time.sleep(sampling_interval)
-
-    baseline = sum(readings) / len(readings) if readings else 0
-    print(f"Puissance de base moyenne mesurée: {baseline:.2f} W")
-    return baseline
-
-# Mesurer l'énergie consommée par une requête en isolant la consommation excédentaire
-def measure_query_energy(query, baseline, sampling_interval=0.1):
+# Mesurer l'énergie consommée par une requête
+def measure_query_energy(query, sampling_interval=0.1):
     result_container = {}
     sampling_data = []
     
@@ -72,9 +56,8 @@ def measure_query_energy(query, baseline, sampling_interval=0.1):
     def sampling_thread():
         while not stop_sampling_event.is_set():  # Utilisation de l'Event pour arrêter le thread
             power = sensor.get_currentValue()
-            extra_power = max(power - baseline, 0)
-            sampling_data.append(extra_power)
-            print(f"Mesure : {power:.2f} W, Puissance excédentaire: {extra_power:.2f} W")
+            sampling_data.append(power)
+            print(f"Mesure : {power:.2f} W")
             time.sleep(sampling_interval)
     
     qt = threading.Thread(target=query_thread)
@@ -88,69 +71,52 @@ def measure_query_energy(query, baseline, sampling_interval=0.1):
     st.join()  # Attendre que le thread d'échantillonnage se termine
     execution_time = time.time() - start_time
 
-    # Correction du calcul d'énergie
+    # Calcul de l'énergie consommée
     energy_consumed = sum(p * sampling_interval for p in sampling_data)
     avg_power = sum(sampling_data) / len(sampling_data) if sampling_data else 0
 
     print(f"Temps d'exécution : {execution_time:.2f}s")
     print(f"Énergie consommée : {energy_consumed:.4f} J")
-    print(f"Puissance moyenne excédentaire : {avg_power:.4f} W")
+    print(f"Puissance moyenne : {avg_power:.4f} W")
 
     return result_container.get('result'), energy_consumed, execution_time, avg_power
 
 # Fonction principale pour exécuter les requêtes et enregistrer les mesures
 def execute_queries_and_log(q_file_path):
-    query_times = []
     energy_data = []
 
     with open(q_file_path, 'r') as file:
         queries = file.read().split('#EOQ#')
-    
-    # Mesurer le baseline avant d'exécuter les requêtes
-    baseline = measure_baseline()
 
     # Exécution de chaque requête SPARQL
     for query in queries:
         query = query.strip()
         if query:
-            result, energy_consumed, execution_time, avg_power = measure_query_energy(query, baseline)
+            result, energy_consumed, execution_time, avg_power = measure_query_energy(query)
             
-            query_times.append({
-                'query': query[:50],
-                'execution_time_s': execution_time
-            })
             energy_data.append({
                 'query': query[:50],
-                'execution_time_s': execution_time,
-                'puissance_moyenne_W': avg_power,
-                'energy_consumed_J': energy_consumed
+                'execution_time_s': round(execution_time, 4),  
+                'puissance_moyenne_W': round(avg_power, 4),   
+                'energy_consumed_J': round(energy_consumed, 4)  
             })
-            print(f"Requête exécutée en {execution_time:.2f}s, énergie consommée: {energy_consumed:.4f} J")
-    # Création du répertoire "generated_files" s'il n'existe pas
+            print(f"Requête exécutée en {execution_time:.2f}s, énergie consommée : {energy_consumed:.4f} J")
+    
     os.makedirs("generated_files", exist_ok=True)
 
     # Définition des chemins de sortie des fichiers
-    query_time_log_result = os.path.join("generated_files", query_time_log)
-    power_log_file_result = os.path.join("generated_files", power_log_file)
-    # Enregistrement des résultats dans des fichiers CSV
+    query_time_log_result = os.path.join("generated_files", power_log_file)
     with open(query_time_log_result, 'w', newline='') as csvfile:
-        fieldnames = ['query', 'execution_time_s']
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(query_times)
-    
-    with open(power_log_file_result, 'w', newline='') as csvfile:
         fieldnames = ['query', 'execution_time_s', 'puissance_moyenne_W', 'energy_consumed_J']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(energy_data)
 
-    print(f"Les données des requêtes et de la consommation énergétique ont été enregistrées dans {query_time_log} et {power_log_file}.")
+    print(f"Les données des requêtes et de la consommation énergétique ont été enregistrées dans {power_log_file}.")
 
 # Exécution du script
 if __name__ == '__main__':
-    # q_file_path = '/home/adminlias/Desktop/PFE /queries_test.q'
-    # q_file_path = '/home/adminlias/ddd/Downloads/rdf-exp-master/queries/individual/watdiv-100m/string/complex.q'
+    
     q_file_path = '/home/adminlias/ddd/Downloads/rdf-exp-master/queries/workloads/watdiv-1b/string/workload_20k/all_sequential_F_C_S_L.q'
     execute_queries_and_log(q_file_path)
     YAPI.FreeAPI()
